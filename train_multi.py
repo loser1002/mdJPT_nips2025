@@ -2,8 +2,7 @@ import hydra
 from omegaconf import DictConfig
 import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,2"
-os.environ["WORLD_SIZE"]="1"
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 import torch
 import numpy as np
 import pytorch_lightning as pl
@@ -21,6 +20,14 @@ log = logging.getLogger(__name__)
 
 @hydra.main(config_path="cfgs_multi", config_name="config_multi", version_base="1.3")
 def run_pipeline(cfg: DictConfig):
+    gpu_count = torch.cuda.device_count()
+    if gpu_count == 0:
+        raise RuntimeError("No CUDA GPU detected; this training entry point requires a GPU.")
+    requested_devices = int(cfg.train.n_gpu_use)
+    devices = min(requested_devices, gpu_count)
+    if devices != requested_devices:
+        log.warning("Requested %d GPUs, but %d visible; using %d.", requested_devices, gpu_count, devices)
+    strategy = "ddp_find_unused_parameters_true" if devices > 1 else "auto"
     pl.seed_everything(cfg.train.seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
@@ -38,8 +45,8 @@ def run_pipeline(cfg: DictConfig):
         logger_save_dir = os.path.join(save_dir, str(fold))
         if not os.path.exists(logger_save_dir):
             os.makedirs(logger_save_dir)
-            logger = TensorBoardLogger(save_dir=logger_save_dir, name=run_name)
-        cfg.data_cfg_list = [cfg.data_0, cfg.data_1, cfg.data_2, cfg.data_3, cfg.data_4]
+        logger = TensorBoardLogger(save_dir=logger_save_dir, name=run_name)
+        cfg.data_cfg_list = [cfg.data_0, cfg.data_1, cfg.data_2, cfg.data_3, cfg.data_4, cfg.data_5]
         cfg.data_cfg_list = [cfg_i for cfg_i in cfg.data_cfg_list if cfg_i.dataset_name != 'None']
         print(f'Using {len(cfg.data_cfg_list)} datasets to pretrain')
         dm = MultiDataModule(cfg.data_cfg_list, fold, n_folds, num_workers=cfg.train.num_workers,
@@ -60,8 +67,9 @@ def run_pipeline(cfg: DictConfig):
         limit_val_batches = 0.0 if n_folds == 1 else 1.0
         trainer = pl.Trainer(
             callbacks=[checkpoint_callback],
+            logger=logger,
             max_epochs=cfg.train.max_epochs, min_epochs=cfg.train.min_epochs, 
-            accelerator='gpu', devices=cfg.train.n_gpu_use, strategy='ddp_find_unused_parameters_true',
+            accelerator='gpu', devices=devices, strategy=strategy,
             limit_val_batches=limit_val_batches
         )
         trainer.fit(model, dm)
